@@ -169,7 +169,7 @@ keeplock pull --ed25519-key ~/.ssh/server_access_ed25519
 ## Notes
 
 - `push` and `pull` read the server connection details from `.keeplock.json` and the namespace name from the current directory name.
-- `push` compares file content by SHA-256, so unchanged files are not re-uploaded.
+- `push` and `pull` compare each file's size and modification time, so unchanged files are not re-transferred. Transfers preserve modification times to keep later syncs fast.
 - Keeplock mirrors regular files and directories. Symbolic links and other special files are ignored.
 - A namespace found under multiple identity directories is an error; manual server cleanup is required.
 

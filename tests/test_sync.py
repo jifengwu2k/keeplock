@@ -9,19 +9,21 @@ import shutil
 import tempfile
 import unittest
 
-from typing import List
+from typing import List, Tuple
 
 import keeplock
 
 
 class FakeEntry(object):
-    __slots__ = ("filename", "st_mode", "st_size")
+    __slots__ = ("filename", "st_mode", "st_size", "st_mtime", "st_atime")
 
-    def __init__(self, filename, st_mode, st_size):
-        # type: (str, int, int) -> None
+    def __init__(self, filename, st_mode, st_size, st_mtime=0, st_atime=0):
+        # type: (str, int, int, int, int) -> None
         self.filename = filename  # type: str
         self.st_mode = st_mode  # type: int
         self.st_size = st_size  # type: int
+        self.st_mtime = st_mtime  # type: int
+        self.st_atime = st_atime  # type: int
 
 
 class FakeSftp(object):
@@ -40,7 +42,13 @@ class FakeSftp(object):
     def stat(self, path):
         # type: (str) -> FakeEntry
         info = os.stat(self.local_path(path))
-        return FakeEntry(os.path.basename(path), info.st_mode, info.st_size)
+        return FakeEntry(
+            os.path.basename(path),
+            info.st_mode,
+            info.st_size,
+            int(info.st_mtime),
+            int(info.st_atime),
+        )
 
     def lstat(self, path):
         # type: (str) -> FakeEntry
@@ -70,13 +78,17 @@ class FakeSftp(object):
         # type: (str, str) -> object
         return open(self.local_path(path), mode)
 
-    def put(self, local_path, remote_path):
-        # type: (str, str) -> None
+    def put(self, local_path, remote_path, callback=None, confirm=True):
+        # type: (str, str, object, bool) -> None
         shutil.copyfile(local_path, self.local_path(remote_path))
 
-    def get(self, remote_path, local_path):
-        # type: (str, str) -> None
+    def get(self, remote_path, local_path, callback=None):
+        # type: (str, str, object) -> None
         shutil.copyfile(self.local_path(remote_path), local_path)
+
+    def utime(self, path, times):
+        # type: (str, Tuple[int, int]) -> None
+        os.utime(self.local_path(path), times)
 
 
 class ScanNamespacesTest(unittest.TestCase):
@@ -273,6 +285,11 @@ class RemoteEntryTest(unittest.TestCase):
         local = os.path.join(self.tmp, "local.txt")
         with open(local, "w") as stream:
             stream.write("a")
+        local_stat = os.stat(local)
+        os.utime(
+            self.sftp.local_path("tree/a.txt"),
+            (local_stat.st_atime, local_stat.st_mtime),
+        )
         self.assertFalse(keeplock.files_differ(self.sftp, local, "tree/a.txt"))
         with open(local, "w") as stream:
             stream.write("changed")

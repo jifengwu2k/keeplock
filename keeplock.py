@@ -74,6 +74,37 @@ class MkdirChange(Change):
     verb = "mkdir"
 
 
+class TransferProgress(object):
+    __slots__ = ("label", "last_percent", "stream", "enabled")
+
+    def __init__(self, label):
+        # type: (str) -> None
+        self.label = label  # type: str
+        self.last_percent = -1  # type: int
+        self.stream = sys.stderr  # type: object
+        try:
+            self.enabled = self.stream.isatty()
+        except Exception:
+            self.enabled = False
+
+    def __call__(self, transferred, total):
+        # type: (int, int) -> None
+        if not self.enabled:
+            return
+        if total:
+            percent = int(transferred * 100.0 / total)
+        else:
+            percent = 100
+        if percent == self.last_percent:
+            return
+        self.last_percent = percent
+        self.stream.write("\r%s %3d%%" % (self.label, percent))
+        self.stream.flush()
+        if percent >= 100:
+            self.stream.write("\n")
+            self.stream.flush()
+
+
 class KeeplockError(Exception):
     __slots__ = ()
 
@@ -376,9 +407,30 @@ def hash_remote_file(sftp, path):
 
 def files_differ(sftp, local_path, remote_path):
     # type: (paramiko.SFTPClient, str, str) -> bool
-    if os.path.getsize(local_path) != sftp.stat(remote_path).st_size:
+    local_stat = os.stat(local_path)
+    remote_stat = sftp.stat(remote_path)
+    if local_stat.st_size != remote_stat.st_size:
         return True
-    return hash_local_file(local_path) != hash_remote_file(sftp, remote_path)
+    return int(local_stat.st_mtime) != int(remote_stat.st_mtime)
+
+
+def preserve_remote_mtime(sftp, remote_path, local_path):
+    # type: (paramiko.SFTPClient, str, str) -> None
+    local_stat = os.stat(local_path)
+    try:
+        sftp.utime(
+            remote_path, (int(local_stat.st_atime), int(local_stat.st_mtime))
+        )
+    except (IOError, OSError):
+        # Some SFTP servers do not support setting timestamps. If that is the
+        # case, later syncs keep re-transferring this file because the
+        # timestamps never match, but the tree stays correct.
+        pass
+
+
+def preserve_local_mtime(local_path, remote_stat):
+    # type: (str, paramiko.SFTPAttributes) -> None
+    os.utime(local_path, (int(remote_stat.st_atime), int(remote_stat.st_mtime)))
 
 
 def remove_local(path):
@@ -483,9 +535,13 @@ def create_entry(sftp, local_path, remote_path, rel, kind, direction, dry_run, c
     if dry_run:
         return
     if direction == "push":
-        sftp.put(local_path, remote_path)
+        progress = TransferProgress("push add %s" % (rel,))
+        sftp.put(local_path, remote_path, callback=progress, confirm=False)
+        preserve_remote_mtime(sftp, remote_path, local_path)
     else:
-        sftp.get(remote_path, local_path)
+        progress = TransferProgress("pull add %s" % (rel,))
+        sftp.get(remote_path, local_path, callback=progress)
+        preserve_local_mtime(local_path, sftp.stat(remote_path))
 
 
 def overwrite_entry(sftp, local_path, remote_path, rel, direction, dry_run, changes):
@@ -494,9 +550,13 @@ def overwrite_entry(sftp, local_path, remote_path, rel, direction, dry_run, chan
     if dry_run:
         return
     if direction == "push":
-        sftp.put(local_path, remote_path)
+        progress = TransferProgress("push update %s" % (rel,))
+        sftp.put(local_path, remote_path, callback=progress, confirm=False)
+        preserve_remote_mtime(sftp, remote_path, local_path)
     else:
-        sftp.get(remote_path, local_path)
+        progress = TransferProgress("pull update %s" % (rel,))
+        sftp.get(remote_path, local_path, callback=progress)
+        preserve_local_mtime(local_path, sftp.stat(remote_path))
 
 
 def delete_entry(sftp, local_path, remote_path, rel, kind, direction, dry_run, changes):
